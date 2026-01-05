@@ -1,0 +1,19 @@
+# Build directory
+target/
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Output files from ray tracer
+*.ppm
