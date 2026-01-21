@@ -1,12 +1,11 @@
-// **** Task 7: Persistent Frontier with RocksDB with rate limiting per domain****
-// Goal : Add rate limiting per domain
-// Extract domain from the URL, maintain per domain queues and wait 1s for link for same domain
+// **** Task 6: Persistent Frontier with RocksDB ****
+// Goal: Learn that crashes shouldn't lose state
+// Store seen set and frontier queue in RocksDB for durability
+
+use std::str::from_utf8;
 
 use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options};
 use scraper::{Html, Selector};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::u64::MAX;
-use std::{str::from_utf8, thread::sleep};
 use url::Url;
 
 #[tokio::main]
@@ -15,7 +14,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cf_ops = Options::default();
     let seen_links_descriptor = ColumnFamilyDescriptor::new("seen", cf_ops.clone());
     let to_crawl_descriptor = ColumnFamilyDescriptor::new("to_crawl", cf_ops.clone());
-    let encountered_domains = ColumnFamilyDescriptor::new("domains", cf_ops.clone());
     let mut db_options = Options::default();
     db_options.create_if_missing(true);
     db_options.set_error_if_exists(false);
@@ -23,11 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let frontier = DB::open_cf_descriptors(
         &db_options,
         path,
-        vec![
-            seen_links_descriptor,
-            to_crawl_descriptor,
-            encountered_domains,
-        ],
+        vec![seen_links_descriptor, to_crawl_descriptor],
     )
     .unwrap();
 
@@ -37,9 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let to_crawl_handle = frontier
         .cf_handle("to_crawl")
         .expect("Column family 'to_crawl' not found");
-    let domain_handle = frontier
-        .cf_handle("domains")
-        .expect("Column family 'domains' not found");
+
     let seed_urls = vec![
         "https://raw.githubusercontent.com/rust-lang/rust/master/README.md",
         "https://dog.ceo/api/breeds/list/all",
@@ -88,7 +80,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .next()
             .is_none()
         {
-            println!("Processed all links. Hurray!");
             break;
         }
         for value in snapshot.iterator_cf(&to_crawl_handle, IteratorMode::Start) {
@@ -104,48 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     println!("Processing : {}", from_utf8(&key)?);
-                    let url = Url::parse(from_utf8(&key)?)?;
-                    let domain = url.host_str().unwrap_or("unknown");
-                    let mut last_fetch: u64 = MAX;
-                    match frontier.get_cf(&domain_handle, domain.as_bytes()) {
-                        Ok(Some(x)) => {
-                            last_fetch = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .expect("Time went backwards")
-                                .as_secs()
-                                - u64::from_be_bytes(x.try_into().unwrap());
-                        }
-                        Ok(None) => {
-                            let current_time = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .expect("backward")
-                                .as_secs();
-                            frontier.put_cf(&domain_handle, &domain, current_time.to_be_bytes())?;
-                        }
-                        Err(e) => {
-                            eprintln!("Error: {}", e);
-                        }
-                    }
-                    if last_fetch < 1 {
-                        println!("Timeout for : {}", &domain);
-                        sleep(Duration::from_secs(1));
-                    }
-                    frontier.put_cf(
-                        &domain_handle,
-                        &domain,
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .expect("backward")
-                            .as_secs()
-                            .to_be_bytes(),
-                    )?;
-
+                    frontier.delete_cf(&to_crawl_handle, &key)?;
                     let body = match reqwest::get(from_utf8(&key)?).await {
                         Ok(resp) if resp.status().is_success() => resp.text().await?,
-                        _ => {
-                            println!("Error processing: {}", from_utf8(&key)?);
-                            continue;
-                        }
+                        _ => continue,
                     };
                     let selector = Selector::parse("a[href]").unwrap();
                     let document = Html::parse_document(&body);
@@ -166,12 +119,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if abs_str.starts_with("http://")
                                         || abs_str.starts_with("https://")
                                     {
-                                        if !frontier.get_cf(&seen_links_handle, &abs_str)?.is_some()
-                                            && !frontier
-                                                .get_cf(&to_crawl_handle, &abs_str)?
-                                                .is_some()
+                                        // Optional: avoid adding same URL again (though seen will catch it later)
+                                        match frontier
+                                            .get_cf(&seen_links_handle, abs_str.as_bytes())
                                         {
-                                            frontier.put_cf(&to_crawl_handle, &abs_str, &[])?;
+                                            Ok(Some(..)) => {
+                                                continue;
+                                            }
+                                            Ok(None) => frontier.put_cf(
+                                                &to_crawl_handle,
+                                                abs_str.as_bytes(),
+                                                &[],
+                                            )?,
+                                            Err(..) => {
+                                                eprintln!("error")
+                                            }
                                         }
                                     }
                                 }
@@ -181,9 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-
                     frontier.put_cf(&seen_links_handle, &key, &[])?;
-                    frontier.delete_cf(&to_crawl_handle, &key)?;
                 }
 
                 Err(e) => {
