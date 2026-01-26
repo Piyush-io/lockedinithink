@@ -1,3 +1,4 @@
+
 // **** Task 7: Persistent Frontier with RocksDB with rate limiting per domain**** Goal : Add rate limiting per domain Extract domain from the URL, maintain per domain queues and wait 1s for link for same domain
 use rocksdb::{ColumnFamilyDescriptor, ColumnFamilyRef, DB, IteratorMode, Options};
 use scraper::{Html, Selector};
@@ -5,63 +6,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::u64::MAX;
 use std::{str::from_utf8, thread::sleep};
 use url::Url;
-
-fn allowed_to_crawl(url: &Url, not_allowed: &Vec<String>) -> bool {
-    let path = Url::path(&url);
-    for rule in not_allowed {
-        if path.starts_with(rule) {
-            return false;
-        }
-    }
-    return true;
-}
-
-async fn build_robots_column(
-    frontier: &DB,
-    domain: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let https_url = format!("https://{}/robots.txt", domain);
-    let http_url = format!("http://{}/robots.txt", domain);
-
-    let txt = match reqwest::get(&https_url).await {
-        Ok(resp) if resp.status().is_success() => resp.text().await?,
-        _ => {
-            let fallback = reqwest::get(&http_url).await?;
-            if fallback.status().is_success() {
-                fallback.text().await?
-            } else {
-                String::new()
-            }
-        }
-    };
-
-    let mut disallowed = Vec::new();
-    let mut in_wildcard = false;
-
-    for line in txt.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut parts = line.splitn(2, ':');
-        let key = parts.next().unwrap().trim().to_lowercase();
-        let value = parts.next().unwrap_or("").trim();
-
-        match key.as_str() {
-            "user-agent" => in_wildcard = value == "*",
-            "disallow" if in_wildcard && !value.is_empty() => disallowed.push(value.to_string()),
-            _ => {}
-        }
-    }
-
-    let blob = disallowed.join("\n");
-    frontier.put_cf(
-        frontier.cf_handle("robots").expect("missing cf"),
-        domain.as_bytes(),
-        blob.as_bytes(),
-    )?;
-    return Ok(blob);
-}
 
 fn add_sub_links_to_frontier(
     frontier: &DB,
@@ -103,6 +47,14 @@ fn add_sub_links_to_frontier(
     Ok(())
 }
 
+// struct Frontier();
+
+// impl Frontier {
+//     pub fn new() -> DB {
+//         DB::open_cf_descriptors()
+//     }
+// }
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = "./crawl_data";
@@ -110,7 +62,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seen_links_descriptor = ColumnFamilyDescriptor::new("seen", cf_ops.clone());
     let to_crawl_descriptor = ColumnFamilyDescriptor::new("to_crawl", cf_ops.clone());
     let encountered_domains = ColumnFamilyDescriptor::new("domains", cf_ops.clone());
-    let robots_stay_away = ColumnFamilyDescriptor::new("robots", cf_ops.clone());
     let mut db_options = Options::default();
     db_options.create_if_missing(true);
     db_options.set_error_if_exists(false);
@@ -119,7 +70,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &db_options,
         path,
         vec![
-            robots_stay_away,
             seen_links_descriptor,
             to_crawl_descriptor,
             encountered_domains,
@@ -136,9 +86,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let domain_handle = frontier
         .cf_handle("domains")
         .expect("Column family 'domains' not found");
-    let robots_handle = frontier
-        .cf_handle("robots")
-        .expect("Column Family 'robots' not found");
     let seed_urls = vec![
         "https://raw.githubusercontent.com/rust-lang/rust/master/README.md",
         "https://dog.ceo/api/breeds/list/all",
@@ -205,28 +152,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Processing : {}", from_utf8(&key)?);
                     let url = Url::parse(from_utf8(&key)?)?;
                     let domain = url.host_str().unwrap_or("unknown");
-                    let mut not_allowed: Vec<String> = Vec::new();
-                    match frontier.get_cf(&robots_handle, domain.as_bytes()) {
-                        Ok(Some(x)) => {
-                            not_allowed = String::from_utf8(x)?.lines().map(String::from).collect();
-                        }
-                        Ok(None) => match build_robots_column(&frontier, domain).await {
-                            Ok(x) => {
-                                not_allowed = x.lines().map(String::from).collect();
-                            }
-
-                            Err(..) => {
-                                eprintln!("error parsing robots.txt for {}, so skipping it", &url);
-                                frontier.put_cf(&seen_links_handle, &key, &[])?;
-                                frontier.delete_cf(&to_crawl_handle, &key)?;
-                                continue;
-                            }
-                        },
-                        Err(e) => {
-                            eprintln!("Error : {}", e)
-                        }
-                    }
-
                     let mut last_fetch: u64 = MAX;
                     match frontier.get_cf(&domain_handle, domain.as_bytes()) {
                         Ok(Some(x)) => {
@@ -260,13 +185,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .as_secs()
                             .to_be_bytes(),
                     )?;
-
-                    if !allowed_to_crawl(&url, &not_allowed) {
-                        println!("Not allowed to crawl : {}", url);
-                        frontier.put_cf(&seen_links_handle, &key, &[])?;
-                        frontier.delete_cf(&to_crawl_handle, &key)?;
-                        continue;
-                    }
                     let body = match reqwest::get(url.as_str()).await {
                         Ok(resp) if resp.status().is_success() => resp.text().await?,
                         _ => {

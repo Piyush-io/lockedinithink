@@ -55,7 +55,7 @@ You want to understand the system deeply, not just copy code. Smart. Here's the 
 - Restart your crawler - it should resume from where it crashed
 - _Intuition: HashMap vs database = volatile vs durable_
 
-### Task 7: Add Politeness (Rate Limiting per Domain)
+### Task 7: Add Politeness (Rate Limiting per Domain) (done)
 
 **Goal:** Don't get IP-banned
 
@@ -64,7 +64,7 @@ You want to understand the system deeply, not just copy code. Smart. Here's the 
 - Wait 1 second between requests to the same domain
 - _Intuition: Real crawlers respect servers - it's ethics and self-preservation_
 
-### Task 8: Implement robots.txt Checking
+### Task 8: Implement robots.txt Checking (done)
 
 **Goal:** Be a good internet citizen
 
